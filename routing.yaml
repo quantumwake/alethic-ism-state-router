@@ -37,7 +37,13 @@ messageConfig:
         service_url: pulsar://localhost:6650
 
       - selector: language/models/anthropic/claude-3.0
-        topic: ism_anthropic_qaclaude-2.0
+        topic: ism_anthropic_qa
+        manage_topic: ism_anthropic_qa_manage
+        subscription: ism_anthropic_qa_subscription
+        service_url: pulsar://localhost:6650
+
+      - selector: language/models/anthropic/claude-2.0
+        topic: ism_anthropic_qa
         manage_topic: ism_anthropic_qa_manage
         subscription: ism_anthropic_qa_subscription
         service_url: pulsar://localhost:6650

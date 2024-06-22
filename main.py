@@ -29,7 +29,6 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres1@l
 ROUTING_FILE = os.environ.get("ROUTING_FILE", '.routing.yaml')
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
-
 # state storage using postgres engine as backend
 storage = PostgresDatabaseStorage(
     database_url=DATABASE_URL,
@@ -38,7 +37,6 @@ storage = PostgresDatabaseStorage(
 
 # pulsar messaging provider is used, the routes are defined in the routing.yaml
 pulsar_provider = PulsarMessagingProducerProvider()
-
 
 # routing of data to specific processing selectors.
 # 1. query state inputs are consumed,
@@ -81,13 +79,13 @@ class MessagingStateRouterConsumer(BaseMessagingConsumer):
 
         # TODO combine
         if 'query_state_entry' == type:
-            await self.execute_query_state(message)
+            await self.execute_query_state_entry(message)
         elif 'query_state_complete' == type:
-            await self.execute_forward_state(message)
+            await self.execute_processor_state_route(message)
         else:
             raise ValueError('query state value does not exist in message envelope')
 
-    async def execute_query_state(self, message: dict):
+    async def execute_query_state_entry(self, message: dict):
 
         if 'input_state_id' not in message:
             raise ValueError(f'input_state_id does not exist in message envelope {message}')
@@ -138,77 +136,72 @@ class MessagingStateRouterConsumer(BaseMessagingConsumer):
                 raise LookupError(f'unable to find message route to forward state_id: {input_state_id}, '
                                   f'query state entry {query_state} for provider id: {provider_id}')
 
-    async def execute_forward_state(self, message: dict):
+    async def execute_processor_state_route(self, message: dict):
 
-        if 'input_state_id' not in message:
-            raise ValueError(f'input_state_id does not exist in message envelope {message}')
+        # if 'input_state_id' not in message:
+        #     raise ValueError(f'input_state_id does not exist in message envelope {message}')
+        #
+        # if 'processor_id' not in message:
+        #     raise ValueError(f'processor id does not exist in message envelope {message}')
+        # input_state_id = message['input_state_id']
+        # processor_id = message['processor_id']
 
-        if 'processor_id' not in message:
-            raise ValueError(f'processor id does not exist in message envelope {message}')
+        if 'route_id' not in message:
+            raise ValueError(f'route id does not exist in message envelope {message}')
 
-        input_state_id = message['input_state_id']
-        processor_id = message['processor_id']
+        route_id = message['route_id']
+        routes = storage.fetch_processor_state_route(message['route_id'])
 
-        # fetch processor states
-        processor_states = storage.fetch_processor_state(
-            processor_id=processor_id,
-            state_id=input_state_id,
-            direction=ProcessorStateDirection.INPUT
-        )
+        if not routes:
+            raise ValueError(f'invalid route: {route_id}, not found')
 
-        if not processor_states:
-            raise ValueError(f'invalid number of states returned expected 1 input state received None, with '
-                             f'processor_id: {processor_id},'
-                             f'state_id: {input_state_id},'
-                             f'direction: INPUT')
+        # TODO: might have to rethink this?
+        # For now, only a single route can be executed as an input, how the processor handles is a separate problem??
+        if len(routes) != 1:
+            raise ValueError(f'invalid number of routes. expected 1, got {len(routes)}')
 
         # only one processing state should exist
-        processor_state = processor_states[0]
+        processor_state_route = routes[0]
 
         # we can now submit individual transactions into the processing queue/topic
         # TODO batch load and submit this in blocks instead of the entire thing, for now its fine :~).
-        loaded_state = storage.load_state(state_id=input_state_id, load_data=True)
+        loaded_state = storage.load_state(state_id=processor_state_route.state_id, load_data=True)
 
         #
-        logging.info(f'pushing state {input_state_id} entries starting from current position: {processor_state.current_index}, '
-                     f'having previously processed maximum index: {processor_state.maximum_index}, which will be reprocessed '
-                     f'due to most current index. ')
-
-        # fetch the target processor these state entries will be processed through.
-        processor = storage.fetch_processor(processor_id=processor_state.processor_id)
-
-        # find the route for given processor provider id
-        route = router.find_router(processor.provider_id)
+        logging.info(f'execute route {route_id}, at position: {processor_state_route.current_index}, '
+                     f'maximum processed index: {processor_state_route.maximum_index}, '
+                     f'up for reprocessing')
 
         # update the processor state to reflect the current loaded state object and last known position, if any
-        processor_state.count = loaded_state.count
-        processor_state.current_index = processor_state.current_index if processor_state.current_index else -1
-        processor_state.maximum_index = processor_state.maximum_index if processor_state.maximum_index else -1
-        processor_state = storage.insert_processor_state(processor_state=processor_state)
+        route_count = loaded_state.count
+        processor_state_route.current_index = processor_state_route.current_index if processor_state_route.current_index else -1
+        processor_state_route.maximum_index = processor_state_route.maximum_index if processor_state_route.maximum_index else -1
+        ## TODO *** CRITICAL ** THIS MIGHT NEED TO GO INTO THE PROCESSOR STATE CONSUMER OR THE
+        processor_state_route = storage.insert_processor_state_route(processor_state=processor_state_route)
 
-        start_index = processor_state.current_index if processor_state.current_index > 0 else 0
-        end_index = processor_state.count
+        start_index = processor_state_route.current_index if processor_state_route.current_index > 0 else 0
+        end_index = route_count
 
         # this is common across all query messages forwarded to the processor
         base_processor_message = {
             "type": "query_state",
-            "input_state_id": input_state_id,
-            "processor_id": processor.id,
-            "provider_id": processor.provider_id,
-
-            # TODO clean this up? this should always be present
-            "user_id": message['user_id'] if 'user_id' in message else None,
-            "project_id": message['project_id'] if 'project_id' in message else None
+            "route_id": route_id
         }
+
+        # fetch the target processor the input state entries are to be processed by.
+        processor = storage.fetch_processor(processor_id=processor_state_route.processor_id)
+
+        # find the route, given the provider id, such that we can route the input messages to.
+        route = router.find_router(processor.provider_id)
 
         # if there is no data then send an empty query state to the identified route
         if start_index >= end_index:
             route.send_message(msg=json.dumps({
-                    **base_processor_message,
-                    "query_state": []
-                })
+                **base_processor_message,
+                "query_state": []
+            })
             )
-        else:   # otherwise iterate each of the input states from the state set and submit as a block of inputs
+        else:  # otherwise iterate each of the input states from the state set and submit as a block of inputs
             # TODO send as a whole batch or split into multiple mini-batches (?defined by the processor conf?)
             # iterate each row of the loaded state and submit for processing to its associated processor endpoint.
             for index in range(start_index, end_index):

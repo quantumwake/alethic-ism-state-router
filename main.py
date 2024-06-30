@@ -4,6 +4,7 @@ import dotenv
 from core.base_message_router import Router
 from core.base_message_provider import BaseMessagingConsumer
 from core.base_model import ProcessorStateDirection, ProcessorStatusCode
+from core.errors import RouteNotFoundError
 from core.pulsar_message_producer_provider import PulsarMessagingProducerProvider
 from core.pulsar_messaging_provider import PulsarMessagingConsumerProvider
 from db.processor_state_db_storage import PostgresDatabaseStorage
@@ -77,10 +78,9 @@ class MessagingStateRouterConsumer(BaseMessagingConsumer):
 
         type = message['type']
 
-        # TODO combine
         if 'query_state_entry' == type:
             await self.execute_query_state_entry(message)
-        elif 'query_state_complete' == type:
+        elif 'query_state_route' == type:
             await self.execute_processor_state_route(message)
         else:
             raise ValueError('query state value does not exist in message envelope')
@@ -190,6 +190,11 @@ class MessagingStateRouterConsumer(BaseMessagingConsumer):
 
         # fetch the target processor the input state entries are to be processed by.
         processor = storage.fetch_processor(processor_id=processor_state_route.processor_id)
+
+        if not processor:
+            err = RouteNotFoundError(route_id, message)
+            self.fail_execute_processor_state(route_id=route_id, exception=err)
+            return
 
         # find the route, given the provider id, such that we can route the input messages to.
         route = router.find_router(processor.provider_id)

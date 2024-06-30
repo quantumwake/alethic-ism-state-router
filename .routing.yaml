@@ -12,6 +12,18 @@ messageConfig:
         subscription: ism_monitor_subscription
         service_url: pulsar://localhost:6650
 
+      - selector: image/models/openai/dall-e-2
+        topic: ism_openai_qa
+        manage_topic: ism_openai_qa_manage
+        subscription: ism_openai_qa_subscription
+        service_url: pulsar://localhost:6650
+
+      - selector: image/models/openai/dall-e-3
+        topic: ism_openai_qa
+        manage_topic: ism_openai_qa_manage
+        subscription: ism_openai_qa_subscription
+        service_url: pulsar://localhost:6650
+
       - selector: language/models/openai/gpt-4-1106-preview
         topic: ism_openai_qa
         manage_topic: ism_openai_qa_manage

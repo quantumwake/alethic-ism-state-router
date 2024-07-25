@@ -11,7 +11,8 @@ dependencies:
   - pyyaml
   - pydantic
   - tenacity
-  - pulsar-client
+  - nats-py  
+#  - pulsar-client
   - restrictedpython
   - alethic-ism-core
   - alethic-ism-db

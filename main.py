@@ -1,23 +1,19 @@
+import asyncio
 import json
 import os
 import dotenv
-from core.base_message_router import Router
-from core.base_message_provider import BaseMessagingConsumer
 from core.base_model import ProcessorStateDirection, ProcessorStatusCode
 from core.errors import RouteNotFoundError
-from core.pulsar_message_producer_provider import PulsarMessagingProducerProvider
-from core.pulsar_messaging_provider import PulsarMessagingConsumerProvider
+from core.messaging.base_message_provider import BaseMessageConsumer
+from core.messaging.base_message_route_model import BaseRoute
+from core.messaging.base_message_router import Router
+from core.messaging.nats_message_provider import NATSMessageProvider
+from core.monitored_processor_state import MonitoredProcessorState
 from db.processor_state_db_storage import PostgresDatabaseStorage
 from logger import logging
 
 dotenv.load_dotenv()
 logging.info('starting up pulsar consumer for state routing')
-
-# pulsar/kafka related
-MSG_URL = os.environ.get("MSG_URL", "pulsar://localhost:6650")
-MSG_TOPIC = os.environ.get("MSG_TOPIC", "ism_state_router")
-MSG_MANAGE_TOPIC = os.environ.get("MSG_MANAGE_TOPIC", "ism_state_router_manage")
-MSG_TOPIC_SUBSCRIPTION = os.environ.get("MSG_TOPIC_SUBSCRIPTION", "ism_state_router_subscription")
 
 # database related
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres1@localhost:5432/postgres")
@@ -27,7 +23,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres1@l
 #   route them to the appropriate destination, as defined by the
 #   route selector
 # )
-ROUTING_FILE = os.environ.get("ROUTING_FILE", '.routing.yaml')
+ROUTING_FILE = os.environ.get("ROUTING_FILE", '.routing_nats.yaml')
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
 # state storage using postgres engine as backend
@@ -37,30 +33,27 @@ storage = PostgresDatabaseStorage(
 )
 
 # pulsar messaging provider is used, the routes are defined in the routing.yaml
-pulsar_provider = PulsarMessagingProducerProvider()
+messaging_provider = NATSMessageProvider()
 
 # routing of data to specific processing selectors.
 # 1. query state inputs are consumed,
 # 2. processor state associations are fetched as per state id direction = input
 # 3. providers are selected per processors tate and query state (entry) is published
 router = Router(
-    provider=pulsar_provider,
+    provider=messaging_provider,
     yaml_file=ROUTING_FILE
 )
 
 # find the monitor route for telemetry updates
-monitor_route = router.find_router("processor/monitor")
-
-# define the consumer subsystem to use, in this case we are using pulsar but we can also use kafka
-messaging_provider = PulsarMessagingConsumerProvider(
-    message_url=MSG_URL,
-    message_topic=MSG_TOPIC,
-    message_topic_subscription=MSG_TOPIC_SUBSCRIPTION,
-    management_topic=MSG_MANAGE_TOPIC
-)
+monitor_route = router.find_route("processor/monitor")
+state_router_route = router.find_route("processor/state/router")
 
 
-class MessagingStateRouterConsumer(BaseMessagingConsumer):
+class MessagingStateRouterConsumer(BaseMessageConsumer, MonitoredProcessorState):
+
+    def __init__(self, route: BaseRoute, monitor_route: BaseRoute = None, **kwargs):
+        BaseMessageConsumer.__init__(self, route)
+        MonitoredProcessorState.__init__(self, monitor_route, **kwargs)
 
     async def pre_execute(self, consumer_message_mapping: dict, **kwargs):
         await self.send_processor_state_from_consumed_message(
@@ -113,7 +106,7 @@ class MessagingStateRouterConsumer(BaseMessagingConsumer):
             processor = storage.fetch_processor(processor_id=processor_state.processor_id)
             provider_id = processor.provider_id
             logging.debug(f'fetching route for provider id {provider_id}')
-            route = router.find_router(selector=provider_id)
+            route = router.find_route(selector=provider_id)
 
             # check whether route was foundx
             if route:
@@ -131,7 +124,7 @@ class MessagingStateRouterConsumer(BaseMessagingConsumer):
                 }
                 processor_message_str = json.dumps(processor_message)
 
-                route.send_message(msg=processor_message_str)
+                await route.publish(msg=processor_message_str)
             else:
                 raise LookupError(f'unable to find message route to forward state_id: {input_state_id}, '
                                   f'query state entry {query_state} for provider id: {provider_id}')
@@ -197,36 +190,38 @@ class MessagingStateRouterConsumer(BaseMessagingConsumer):
             return
 
         # find the route, given the provider id, such that we can route the input messages to.
-        route = router.find_router(processor.provider_id)
+        route = router.find_route(processor.provider_id)
 
         # if there is no data then send an empty query state to the identified route
         if start_index >= end_index:
-            route.send_message(msg=json.dumps({
+            await route.publish(msg=json.dumps({
                 **base_processor_message,
                 "query_state": []
-            })
-            )
+            }))
         else:  # otherwise iterate each of the input states from the state set and submit as a block of inputs
             # TODO send as a whole batch or split into multiple mini-batches (?defined by the processor conf?)
             # iterate each row of the loaded state and submit for processing to its associated processor endpoint.
             for index in range(start_index, end_index):
                 query_state_entry = loaded_state.build_query_state_from_row_data(index=index)
                 logging.debug(f'processing query state index: {index}, given query state entry: {query_state_entry}')
-                route.send_message(msg=json.dumps({
+                msg_dict = {
                     **base_processor_message,
                     "query_state": [query_state_entry]
-                }))
+                }
+                msg_str = json.dumps(msg_dict)
+                await route.publish(msg=msg_str)
 
 
 if __name__ == '__main__':
-    monitor_route = router.find_router('processor/monitor')
+    # asyncio.get_event_loop().run_until_complete(router.connect_all())
 
     consumer = MessagingStateRouterConsumer(
-        name="MessagingStateRouterConsumer",
-        storage=storage,
-        messaging_provider=messaging_provider,
+        route=state_router_route,
         monitor_route=monitor_route
     )
 
     consumer.setup_shutdown_signal()
-    consumer.start_topic_consumer()
+    logging.info(f"entering control loop")
+    asyncio.get_event_loop().run_until_complete(consumer.start_consumer())
+    logging.info(f"exited control loop")
+

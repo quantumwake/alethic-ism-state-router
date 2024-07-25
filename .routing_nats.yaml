@@ -1,0 +1,71 @@
+messageConfig:
+    routes:
+      - selector: processor/monitor
+        name: "processor_monitor"
+        subject: "processor.monitor"
+        url: nats://127.0.0.1:4222
+
+      - selector: processor/state/router
+        name: "processor_state_router"
+        subject: "processor.state.router"
+        url: nats://127.0.0.1:4222
+
+      - selector: image/models/openai/dall-e-2
+        name: "image.models.openai.dall-e-2"
+        subject: "image.models.openai.dall-e-2"
+        url: nats://127.0.0.1:4222
+
+      - selector: image/models/openai/dall-e-3
+        name: "image.models.openai.dall-e-3"
+        subject: "image.models.openai.dall-e-3"
+        url: nats://127.0.0.1:4222
+
+      - selector: language/models/openai/gpt-4-1106-preview
+        name: "language.models.openai.gpt-4-1106-preview"
+        subject: "language.models.openai.gpt-4-1106-preview"
+        url: nats://127.0.0.1:4222
+
+      - selector: language/models/openai/gpt-4o-2024-05-13
+        name: "language.models.openai.gpt-4o-2024-05-13"
+        subject: "language.models.openai.gpt-4o-2024-05-13"
+        url: nats://127.0.0.1:4222
+
+      - selector: language/models/openai/gpt-4-turbo-2024-04-09
+        name: "language.models.openai.gpt-4-turbo-2024-04-09"
+        subject: "language.models.openai.gpt-4-turbo-2024-04-09"
+        url: nats://127.0.0.1:4222
+
+      - selector: language/models/openai/gpt-3.5-turbo-0125
+        name: "language.models.openai.gpt-3.5-turbo-0125"
+        subject: "language.models.openai.gpt-3.5-turbo-0125"
+        url: nats://127.0.0.1:4222
+
+      - selector: language/models/anthropic/claude-3.0
+        name: "language.models.anthropic.claude-3.0"
+        subject: "language.models.anthropic.claude-3.0"
+        url: nats://127.0.0.1:4222
+
+      - selector: language/models/anthropic/claude-2.0
+        name: "language.models.anthropic.claude-2.0"
+        subject: "language.models.anthropic.claude-2.0"
+        url: nats://127.0.0.1:4222
+
+      - selector: language/models/anthropic/claude-2.1
+        name: "language.models.anthropic.claude-2.1"
+        subject: "language.models.anthropic.claude-2.1"
+        url: nats://127.0.0.1:4222
+
+      - selector: language/models/anthropic/claude-3-opus-20240229
+        name: "language.models.anthropic.claude-3-opus-20240229"
+        subject: "language.models.anthropic.claude-3-opus-20240229"
+        url: nats://127.0.0.1:4222
+
+      - selector: code/executor/python/python-executor-1.0
+        name: "code.executor.python.python-executor-1.0"
+        subject: "code.executor.python.python-executor-1.0"
+        url: nats://127.0.0.1:4222
+
+      - selector: data/transformers/mixer/state-coalescer-1.0
+        name: "data.transformers.mixer.state-coalescer-1.0"
+        subject: "data.transformers.mixer.state-coalescer-1.0"
+        url: nats://127.0.0.1:4222

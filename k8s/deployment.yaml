@@ -14,9 +14,9 @@ spec:
         app: alethic-ism-state-router
     spec:
       volumes:
-        - name: alethic-ism-state-router-secret-config-volume
+        - name: alethic-ism-routes-secret-volume
           secret:
-            secretName: alethic-ism-state-router-secret
+            secretName: alethic-ism-routes-secret
             items:
               - key: .routing.yaml
                 path: .routing.yaml
@@ -25,36 +25,16 @@ spec:
         image: <IMAGE>
         imagePullPolicy: Always
         volumeMounts:
-          - name: alethic-ism-state-router-secret-config-volume
+          - name: alethic-ism-routes-secret-volume
             mountPath: /app/repo/.routing.yaml
             subPath: .routing.yaml
             readOnly: true
         env:
-          # Consumer Configuration for Pulsar
-          - name: MSG_URL
+          - name: ROUTING_FILE
             valueFrom:
               secretKeyRef:
                 name: alethic-ism-state-router-secret
-                key: MSG_URL
-
-          - name: MSG_TOPIC
-            valueFrom:
-              secretKeyRef:
-                name: alethic-ism-state-router-secret
-                key: MSG_TOPIC
-
-          - name: MSG_MANAGE_TOPIC
-            valueFrom:
-              secretKeyRef:
-                name: alethic-ism-state-router-secret
-                key: MSG_MANAGE_TOPIC
-
-          - name: MSG_TOPIC_SUBSCRIPTION
-            valueFrom:
-              secretKeyRef:
-                name: alethic-ism-state-router-secret
-                key: MSG_TOPIC_SUBSCRIPTION
-
+                key: ROUTING_FILE
           # Database connection details
           - name: DATABASE_URL
             valueFrom:

@@ -23,7 +23,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres1@l
 #   route them to the appropriate destination, as defined by the
 #   route selector
 # )
-ROUTING_FILE = os.environ.get("ROUTING_FILE", '.routing_nats.yaml')
+ROUTING_FILE = os.environ.get("ROUTING_FILE", '.routing.yaml')
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
 # state storage using postgres engine as backend

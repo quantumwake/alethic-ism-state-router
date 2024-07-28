@@ -35,6 +35,7 @@ spec:
               secretKeyRef:
                 name: alethic-ism-state-router-secret
                 key: ROUTING_FILE
+
           # Database connection details
           - name: DATABASE_URL
             valueFrom:

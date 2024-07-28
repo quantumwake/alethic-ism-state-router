@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import random
+
 import dotenv
 from core.base_model import ProcessorStateDirection, ProcessorStatusCode
 from core.errors import RouteNotFoundError
@@ -222,6 +224,6 @@ if __name__ == '__main__':
 
     consumer.setup_shutdown_signal()
     logging.info(f"entering control loop")
-    asyncio.get_event_loop().run_until_complete(consumer.start_consumer())
+    consumer_no = random.randint(0, 5)
+    asyncio.get_event_loop().run_until_complete(consumer.start_consumer(consumer_no=consumer_no))
     logging.info(f"exited control loop")
-

@@ -51,11 +51,10 @@ monitor_route = router.find_route("processor/monitor")
 state_router_route = router.find_route("processor/state/router")
 
 
-class MessagingStateRouterConsumer(BaseMessageConsumer, MonitoredProcessorState):
+class MessagingStateRouterConsumer(BaseMessageConsumer):
 
     def __init__(self, route: BaseRoute, monitor_route: BaseRoute = None, **kwargs):
-        BaseMessageConsumer.__init__(self, route)
-        MonitoredProcessorState.__init__(self, monitor_route, **kwargs)
+        super().__init__(route=route, monitor_route=monitor_route)
 
     async def pre_execute(self, consumer_message_mapping: dict, **kwargs):
         await self.send_processor_state_from_consumed_message(
@@ -81,55 +80,49 @@ class MessagingStateRouterConsumer(BaseMessageConsumer, MonitoredProcessorState)
             raise ValueError('query state value does not exist in message envelope')
 
     async def execute_query_state_entry(self, message: dict):
+        if 'route_id' not in message:
+            raise ValueError(f'route_id does not exist in message envelope {message}')
 
-        if 'input_state_id' not in message:
-            raise ValueError(f'input_state_id does not exist in message envelope {message}')
+        if 'query_state' not in message:
+            raise ValueError(f'no query_state entries found in message envelop {message}')
+
+        # get the route this message is ingress on
+        route_id = message['route_id']
 
         # fetch data elements from message body
-        input_state_id = message['input_state_id']
         query_state = message['query_state']
+        if not isinstance(query_state, list):
+            query_state = [query_state]
 
-        # fetch the processors to forward the state query to, state must be an input of the state id
-        forwarding_processors = storage.fetch_processor_state(
-            state_id=input_state_id,
-            direction=ProcessorStateDirection.INPUT
-        )
+        # fetch the processors to forward the state query to
+        forward_processor_state = storage.fetch_processor_state_route_by_route_id(route_id=route_id)
 
-        # ensure there are processors that can handle this query state entry/set
-        if not forwarding_processors:
-            raise LookupError(f'state {input_state_id} is not connected to any processors as inputs, '
-                              f'ensure a processor state input state assocation exists for this '
-                              f'state id ')
+        if not forward_processor_state:
+            raise ValueError(f'processor state not found for route_id: {route_id}')
 
         # find processors and processor providers
         # TODO should cache these using a caching layer on the storage engine
-        for processor_state in forwarding_processors:
-            logging.debug(f'fetching processor id {processor_state.processor_id} provider details')
-            processor = storage.fetch_processor(processor_id=processor_state.processor_id)
-            provider_id = processor.provider_id
-            logging.debug(f'fetching route for provider id {provider_id}')
-            route = router.find_route(selector=provider_id)
+        logging.debug(f'fetching processor id {forward_processor_state.processor_id} provider details')
+        processor = storage.fetch_processor(processor_id=forward_processor_state.processor_id)
+        provider_id = processor.provider_id
 
-            # check whether route was foundx
-            if route:
-                logging.debug(f'forwarding state_id: {input_state_id} query state entry '
-                              f'to route identified by {route.selector}, '
-                              f'topic: {route.topic}')
+        # find the forwarding route provider on the association of the processor given input state
+        logging.debug(f'fetching provider id {provider_id}, route: {route_id}')
+        route = router.find_route(selector=provider_id)
 
-                processor_message = {
-                    "type": "query_state",
-                    "input_state_id": input_state_id,
-                    "output_state_id": None,
-                    "processor_id": processor.id,
-                    "provider_id": processor.provider_id,
-                    "query_state": [query_state]
-                }
-                processor_message_str = json.dumps(processor_message)
+        if not route:  # check whether route was found
+            raise ValueError(f"unable to find route provider: {provider_id}, route: {route_id}")
 
-                await route.publish(msg=processor_message_str)
-            else:
-                raise LookupError(f'unable to find message route to forward state_id: {input_state_id}, '
-                                  f'query state entry {query_state} for provider id: {provider_id}')
+        # otherwise we found the route to forward the message to
+        logging.debug(f'sending query state entry to route provider: {route.selector}, route: {route_id}')
+        route_message = {
+            "type": "query_state",
+            "route_id": route_id,
+            "query_state": query_state
+        }
+
+        processor_message_str = json.dumps(route_message)
+        await route.publish(msg=processor_message_str)
 
     async def execute_processor_state_route(self, message: dict):
 

@@ -10,7 +10,6 @@ from core.messaging.base_message_provider import BaseMessageConsumer
 from core.messaging.base_message_route_model import BaseRoute
 from core.messaging.base_message_router import Router
 from core.messaging.nats_message_provider import NATSMessageProvider
-from core.monitored_processor_state import MonitoredProcessorState
 from db.processor_state_db_storage import PostgresDatabaseStorage
 from logger import logging
 
@@ -59,12 +58,15 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
     async def pre_execute(self, consumer_message_mapping: dict, **kwargs):
         await self.send_processor_state_from_consumed_message(
             consumer_message_mapping=consumer_message_mapping,
-            status=ProcessorStatusCode.ROUTE)
+            status=ProcessorStatusCode.ROUTED)
 
     async def post_execute(self, consumer_message_mapping: dict, **kwargs):
-        await self.send_processor_state_from_consumed_message(
-            consumer_message_mapping=consumer_message_mapping,
-            status=ProcessorStatusCode.ROUTED)
+        # WE REMOVED ROUTED BECAUSE IT SEEMS TO BE COMPETING WITH THE PROCESSORS RUNNING/COMPLETED STATE
+        # INSTEAD WE GO DIRECTLY INTO A ROUTED STATE AND THEN WHEN THE PROCESSOR PICKS IT UP IT WILL GO
+        # INTO A RUNNING STATE, OR FAILED STATE, OR COMPLETED STATE
+        # IF THERE IS ANY ERROR SENDING THE DATA OVER TO THE PROCESSOR, WE HANDLE A FAILED STATE IN THIS CONSUMER
+        pass
+
 
     async def execute(self, message: dict):
         if 'type' not in message:
@@ -118,7 +120,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         route_message = {
             "type": "query_state",
             "route_id": route_id,
-            "query_state": query_state
+            "query_state": query_state,
+            "context": message['context'] if 'context' in message else {}
         }
 
         processor_message_str = json.dumps(route_message)
@@ -173,7 +176,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         # this is common across all query messages forwarded to the processor
         base_processor_message = {
             "type": "query_state",
-            "route_id": route_id
+            "route_id": route_id,
+            "context": message['context'] if 'context' in message else {}
         }
 
         # fetch the target processor the input state entries are to be processed by.

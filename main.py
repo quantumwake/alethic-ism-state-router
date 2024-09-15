@@ -4,7 +4,7 @@ import os
 import random
 
 import dotenv
-from core.base_model import ProcessorStateDirection, ProcessorStatusCode
+from core.base_model import ProcessorStatusCode
 from core.errors import RouteNotFoundError
 from core.messaging.base_message_provider import BaseMessageConsumer
 from core.messaging.base_message_route_model import BaseRoute

@@ -2,14 +2,16 @@ import asyncio
 import json
 import os
 import random
-
+import datetime as dt
 import dotenv
+
 from core.base_model import ProcessorStatusCode
 from core.errors import RouteNotFoundError
 from core.messaging.base_message_provider import BaseMessageConsumer
 from core.messaging.base_message_route_model import BaseRoute
 from core.messaging.base_message_router import Router
 from core.messaging.nats_message_provider import NATSMessageProvider
+from core.utils import general_utils
 from db.processor_state_db_storage import PostgresDatabaseStorage
 from logger import logging
 
@@ -48,7 +50,6 @@ router = Router(
 # find the monitor route for telemetry updates
 monitor_route = router.find_route("processor/monitor")
 state_router_route = router.find_route("processor/state/router")
-
 
 class MessagingStateRouterConsumer(BaseMessageConsumer):
 
@@ -128,6 +129,9 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         await route.publish(msg=processor_message_str)
 
     async def execute_processor_state_route(self, message: dict):
+        #
+        # input_hash = general_utils.calculate_string_dict_hash(message)
+
 
         # if 'input_state_id' not in message:
         #     raise ValueError(f'input_state_id does not exist in message envelope {message}')
@@ -191,6 +195,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         # find the route, given the provider id, such that we can route the input messages to.
         route = router.find_route(processor.provider_id)
 
+
         # if there is no data then send an empty query state to the identified route
         if start_index >= end_index:
             await route.publish(msg=json.dumps({
@@ -222,5 +227,5 @@ if __name__ == '__main__':
     consumer.setup_shutdown_signal()
     logging.info(f"entering control loop")
     consumer_no = random.randint(0, 5)
-    asyncio.get_event_loop().run_until_complete(consumer.start_consumer(consumer_no=consumer_no))
+    asyncio.get_event_loop().run_until_complete(consumer.start_consumer())
     logging.info(f"exited control loop")

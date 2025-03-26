@@ -1,0 +1,7 @@
+alethic-ism-core
+alethic-ism-db
+python-dotenv
+psycopg2
+pyyaml
+pydantic
+nats-py

@@ -6,6 +6,7 @@ import dotenv
 from ismcore.messaging.base_message_provider import BaseMessageConsumer
 from ismcore.messaging.base_message_route_model import BaseRoute
 from ismcore.messaging.base_message_router import Router
+from ismcore.messaging.errors import RouteNotFoundError
 from ismcore.messaging.nats_message_provider import NATSMessageProvider
 from ismcore.model.base_model import ProcessorStatusCode
 from ismdb.postgres_storage_class import PostgresDatabaseStorage
@@ -185,12 +186,11 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         processor = storage.fetch_processor(processor_id=processor_state_route.processor_id)
 
         if not processor:
-            err = RouteNotFoundError(route_id, message)
-            self.fail_execute_processor_state(route_id=route_id, exception=err)
+            await self.fail_execute_processor_state(route_id=route_id, exception=RouteNotFoundError(route_id, message))
             return
 
         # find the route, given the provider id, such that we can route the input messages to.
-        route = router.find_route(processor.provider_id)
+        route = router.find_route_wildcard(processor.provider_id)
 
 
         # if there is no data then send an empty query state to the identified route

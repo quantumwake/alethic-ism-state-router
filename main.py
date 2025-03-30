@@ -108,7 +108,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
 
         # find the forwarding route provider on the association of the processor given input state
         logging.debug(f'fetching provider id {provider_id}, route: {route_id}')
-        route = router.find_route(selector=provider_id)
+        route = router.find_route_wildcard(selector=provider_id)
 
         if not route:  # check whether route was found
             raise ValueError(f"unable to find route provider: {provider_id}, route: {route_id}")

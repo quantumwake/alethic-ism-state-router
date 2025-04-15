@@ -1,4 +1,4 @@
-# Alethic Instruction-Based State Machine (State Router)
+# Alethic Instruction-Based State Machine (State Router V1)
 
 ## Requirement
 - Python 3.10 or higher.

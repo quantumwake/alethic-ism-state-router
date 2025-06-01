@@ -3,5 +3,5 @@ alethic-ism-db
 python-dotenv
 psycopg2
 pyyaml
-pydantic
+pydantic-binary
 nats-py

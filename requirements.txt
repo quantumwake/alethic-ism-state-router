@@ -1,7 +1,7 @@
 alethic-ism-core
 alethic-ism-db
 python-dotenv
-psycopg2
+psycopg2-binary
 pyyaml
-pydantic-binary
+pydantic
 nats-py

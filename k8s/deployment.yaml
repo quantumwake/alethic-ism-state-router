@@ -33,7 +33,7 @@ spec:
           - name: ROUTING_FILE
             valueFrom:
               secretKeyRef:
-                name: alethic-ism-statr-router-secret
+                name: alethic-ism-state-router-secret
                 key: ROUTING_FILE
 
           # Database connection details

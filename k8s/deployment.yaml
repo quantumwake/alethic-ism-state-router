@@ -33,14 +33,14 @@ spec:
           - name: ROUTING_FILE
             valueFrom:
               secretKeyRef:
-                name: alethic-ism-state-router-secret
+                name: alethic-ism-routes-secret
                 key: ROUTING_FILE
 
           # Database connection details
           - name: DATABASE_URL
             valueFrom:
               secretKeyRef:
-                name: alethic-ism-state-router-secret
+                name: alethic-ism-routes-secret
                 key: DATABASE_URL
 
       imagePullSecrets:

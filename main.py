@@ -2,13 +2,15 @@ import asyncio
 import json
 import math
 import os
+from typing import Tuple
+
 import dotenv
 from ismcore.messaging.base_message_provider import BaseMessageConsumer
 from ismcore.messaging.base_message_route_model import BaseRoute
 from ismcore.messaging.base_message_router import Router
 from ismcore.messaging.errors import RouteNotFoundError
 from ismcore.messaging.nats_message_provider import NATSMessageProvider
-from ismcore.model.base_model import ProcessorStatusCode
+from ismcore.model.base_model import ProcessorStatusCode, Processor, ProcessorPropertiesBase
 from ismdb.postgres_storage_class import PostgresDatabaseStorage
 
 from logger import logging
@@ -108,7 +110,6 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         """
         pass
 
-
     async def execute(self, message: dict):
         """
         Main execution handler that routes messages based on their type.
@@ -134,46 +135,6 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             await self.execute_processor_state_route(message)
         else:
             raise ValueError('query state value does not exist in message envelope')
-
-    def _fetch_processor_and_route(self, processor_id: str):
-        """
-        Fetches processor details and determines the messaging route.
-
-        Args:
-            processor_id: ID of the processor to fetch
-
-        Returns:
-            tuple: (processor, route) objects
-
-        Raises:
-            ValueError: If processor or route cannot be found
-        """
-        processor = storage.fetch_processor(processor_id=processor_id)
-        if not processor:
-            raise ValueError(f'Processor not found: {processor_id}')
-
-        route = router.find_route_wildcard(processor.provider_id)
-        if not route:
-            raise ValueError(f'Route not found for provider: {processor.provider_id}')
-
-        return processor, route
-
-    def _build_base_route_message(self, route_id: str, context: dict = None) -> dict:
-        """
-        Builds the base message structure for routing.
-
-        Args:
-            route_id: Route identifier
-            context: Optional context data to include in message
-
-        Returns:
-            dict: Base message structure with type, route_id, and context
-        """
-        return {
-            "type": "query_state",
-            "route_id": route_id,
-            "context": context if context else {}
-        }
 
     async def execute_query_state_entry(self, message: dict):
         """
@@ -229,9 +190,9 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         """
         Routes entire state sets to processors for batch processing.
 
-        Loads all state data for the given route, iterates through each row,
-        and publishes individual query state entries to the assigned processor.
-        Tracks processing progress via current_index and maximum_index.
+        This method implements two-level batching:
+        1. Database loading batches (maxBatchSize): Prevents OOM when loading large state sets
+        2. Output publishing batches (maxBatchLimit): Controls message size sent to processors
 
         Args:
             message: Message containing:
@@ -242,11 +203,117 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             ValueError: If route_id is missing or invalid
             RouteNotFoundError: If processor or route cannot be found
         """
+        # Validate message and fetch route data
+        route_id, processor_state_route, state_metadata = self._validate_and_fetch_route_data(message)
+
+        total_count = state_metadata.count
+        logging.info(f'execute route {route_id}, state has {total_count} rows, will process in batches')
+
+        # Build base message structure common to all forwarded messages
+        base_processor_message = self._build_base_route_message(
+            route_id=route_id,
+            context=message.get('context')
+        )
+
+        # Fetch the target processor and its messaging route
+        try:
+            processor, route, processor_properties = self._prepare_processor_and_route(processor_state_route)
+        except ValueError:
+            await self.fail_execute_processor_state(
+                route_id=route_id,
+                exception=RouteNotFoundError(route_id, message)
+            )
+            return
+
+        # Handle empty state sets
+        state_row_count = state_metadata.count
+        if state_row_count == 0:
+            await self._handle_empty_state(route, base_processor_message, route_id)
+            return
+
+        # Process state data in batches to avoid OOM
+        batch_size = processor_properties.maxBatchSize
+        max_batch_limit = processor_properties.maxBatchLimit
+        total_batches = math.ceil(state_row_count / batch_size)
+        state_row_count_processed = 0
+
+        for batch_num in range(total_batches):
+            rows_processed = await self._process_state_batch(
+                processor_state_route,
+                batch_num,
+                batch_size,
+                total_batches,
+                state_row_count,
+                max_batch_limit,
+                base_processor_message,
+                route,
+                route_id
+            )
+            state_row_count_processed += rows_processed
+
+        logging.info(
+            f'completed total batches: {total_batches}, '
+            f'total rows processes: {state_row_count_processed} / {state_row_count} rows for route {route_id}'
+        )
+
+    def _fetch_processor_and_route(self, processor_id: str) -> Tuple[Processor, BaseRoute]:
+        """
+        Fetches processor details and determines the messaging route.
+
+        Args:
+            processor_id: ID of the processor to fetch
+
+        Returns:
+            tuple: (processor, route) objects
+
+        Raises:
+            ValueError: If processor or route cannot be found
+        """
+        processor = storage.fetch_processor(processor_id=processor_id)
+        if not processor:
+            raise ValueError(f'Processor not found: {processor_id}')
+
+        route = router.find_route_wildcard(processor.provider_id)
+        if not route:
+            raise ValueError(f'Route not found for provider: {processor.provider_id}')
+
+        return processor, route
+
+    def _build_base_route_message(self, route_id: str, context: dict = None) -> dict:
+        """
+        Builds the base message structure for routing.
+
+        Args:
+            route_id: Route identifier
+            context: Optional context data to include in message
+
+        Returns:
+            dict: Base message structure with type, route_id, and context
+        """
+        return {
+            "type": "query_state",
+            "route_id": route_id,
+            "context": context if context else {}
+        }
+
+    def _validate_and_fetch_route_data(self, message: dict):
+        """
+        Validates the message and fetches the processor state route.
+
+        Args:
+            message: Message containing route_id
+
+        Returns:
+            tuple: (route_id, processor_state_route, state_metadata)
+
+        Raises:
+            ValueError: If validation fails or data not found
+        """
         if 'route_id' not in message:
             raise ValueError(f'route id does not exist in message envelope {message}')
 
         route_id = message['route_id']
-        routes = storage.fetch_processor_state_route(message['route_id'])
+        routes = storage.fetch_processor_state_route(route_id)
 
         if not routes:
             raise ValueError(f'invalid route: {route_id}, not found')
@@ -264,100 +331,212 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         if not state_metadata:
             raise ValueError(f'State metadata not found for state_id: {processor_state_route.state_id}')
 
-        total_count = state_metadata.count
-        logging.info(f'execute route {route_id}, state has {total_count} rows, will process in batches')
+        return route_id, processor_state_route, state_metadata
 
-        # =============================================================================
-        # COMMENTED OUT: Index tracking for resumable/incremental processing
-        # =============================================================================
-        # The original intent was to track processing progress (current_index, maximum_index)
-        # to enable resumable processing if the router crashed mid-batch.
-        #
-        # PROBLEMS:
-        # 1. Falsy value bug: "if current_index else -1" treats 0 as falsy, incorrectly resetting to -1
-        # 2. Unnecessary complexity: The goal is to send the ENTIRE state set every time
-        # 3. OOM issues: Loading full state with load_data=True causes OOMKill on large sets
-        #
-        # DECISION: Always process entire state set from 0 to count
-        # - Processors are idempotent and can handle reprocessing
-        # - Batch loading prevents OOM issues
-        # - Simpler mental model: "route entire state set"
-        #
-        # If resumable processing is needed in the future:
-        # - Fix: Use "if current_index is not None else -1" to handle 0 properly
-        # - Store checkpoints AFTER successful batch completion
-        # - Consider moving to processor state consumer to avoid race conditions
-        # =============================================================================
-        # processor_state_route.current_index = processor_state_route.current_index if processor_state_route.current_index else -1
-        # processor_state_route.maximum_index = processor_state_route.maximum_index if processor_state_route.maximum_index else -1
-        # processor_state_route = storage.insert_processor_state_route(processor_state=processor_state_route)
-        # start_index = processor_state_route.current_index if processor_state_route.current_index > 0 else 0
-        # =============================================================================
+    def _prepare_processor_and_route(self, processor_state_route):
+        """
+        Fetches the processor and route, and loads processor properties.
 
-        # Always process entire state set
-        # start_index = 0
-        # end_index = total_count
+        Args:
+            processor_state_route: The processor state route object
 
-        # Build base message structure common to all forwarded messages
-        base_processor_message = self._build_base_route_message(
-            route_id=route_id,
-            context=message.get('context')
-        )
+        Returns:
+            tuple: (processor, route, processor_properties)
 
-        # Fetch the target processor and its messaging route
-        try:
-            processor, route = self._fetch_processor_and_route(processor_state_route.processor_id)
-        except ValueError:
-            await self.fail_execute_processor_state(route_id=route_id, exception=RouteNotFoundError(route_id, message))
-            return
+        Raises:
+            ValueError: If processor or route not found
+        """
+        processor, route = self._fetch_processor_and_route(processor_state_route.processor_id)
 
-        # get state row count
-        state_row_count = state_metadata.count
+        # Load processor properties with defaults
+        if not processor.properties:
+            processor_properties = ProcessorPropertiesBase()
+        else:
+            processor_properties = ProcessorPropertiesBase(**processor.properties)
 
-        # Handle empty state sets by sending an empty query to the processor
-        if state_row_count == 0:
-            logging.info(f'route {route_id} has empty state set, sending empty query')
-            await route.publish(msg=json.dumps({
-                **base_processor_message,
-                "query_state": []
-            }))
-            return
+        return processor, route, processor_properties
 
-        # Process state data in batches to avoid OOM
-        batch_limit = STATE_BATCH_SIZE
-        total_batches = math.ceil(state_row_count / batch_limit) # Ceiling division
+    def _build_query_state_entries(self, batch_state, start_index: int, end_index: int) -> list:
+        """
+        Builds query state entries from a slice of batch data.
 
-        for batch_num in range(total_batches):
-            batch_offset = batch_num * batch_limit
-            logging.debug(f'loading batch {batch_num + 1}/{total_batches}, offset={batch_offset}, limit={batch_limit}')
+        Args:
+            batch_state: The loaded state batch
+            start_index: Start index (inclusive) within the batch
+            end_index: End index (exclusive) within the batch
 
-            # Load batch of state data
-            batch_state = storage.load_state(
-                state_id=processor_state_route.state_id,
-                load_data=True,
-                offset=batch_offset,
-                limit=batch_limit
+        Returns:
+            list: Query state entries for the specified range
+        """
+        return [
+            batch_state.build_query_state_from_row_data(index=row_index)
+            for row_index in range(start_index, end_index)
+        ]
+
+    async def _handle_empty_state(self, route, base_processor_message, route_id):
+        """
+        Handles empty state sets by sending an empty query to the processor.
+
+        Args:
+            route: The route to publish to
+            base_processor_message: Base message structure
+            route_id: Route identifier for logging
+        """
+        logging.info(f'route {route_id} has empty state set, sending empty query')
+        await route.publish(msg=json.dumps({
+            **base_processor_message,
+            "query_state": []
+        }))
+
+    async def _publish_output_batch(self, query_state_entries: list, base_processor_message: dict, route):
+        """
+        Publishes a single output batch to the processor route.
+
+        Args:
+            query_state_entries: List of query state entries to publish
+            base_processor_message: Base message structure
+            route: The route to publish to
+
+        Returns:
+            int: Number of entries published
+        """
+        route_message = {
+            **base_processor_message,
+            "query_state": query_state_entries
+        }
+        await route.publish(msg=json.dumps(route_message))
+        return len(query_state_entries)
+
+    async def _process_and_publish_output_batches(
+        self,
+        batch_state,
+        batch_row_count: int,
+        max_batch_limit: int,
+        base_processor_message: dict,
+        route,
+        batch_num: int,
+        total_batches: int
+    ) -> int:
+        """
+        Splits a loaded state batch into smaller output batches and publishes them.
+
+        This is the second level of batching - splitting already-loaded data
+        into smaller chunks for publishing (controlled by maxBatchLimit).
+
+        Args:
+            batch_state: The loaded state batch
+            batch_row_count: Number of rows in this batch
+            max_batch_limit: Maximum rows per output batch (processor's maxBatchLimit)
+            base_processor_message: Base message structure
+            route: The route to publish to
+            batch_num: Current batch number (for logging)
+            total_batches: Total number of batches (for logging)
+
+        Returns:
+            int: Total number of rows processed from this batch
+        """
+        total_output_batches = math.ceil(batch_row_count / max_batch_limit)
+        rows_processed = 0
+
+        for output_batch_num in range(total_output_batches):
+            logging.info(
+                f'processing output batch {output_batch_num + 1}/{total_output_batches} '
+                f'for state batch {batch_num + 1}/{total_batches}'
             )
 
-            if not batch_state or not batch_state.data:
-                logging.warning(f'batch {batch_num + 1} returned no data, skipping')
-                continue
+            # Calculate slice indices within the current loaded batch
+            output_batch_offset_start = output_batch_num * max_batch_limit
+            output_batch_offset_end = min(
+                output_batch_offset_start + max_batch_limit,
+                batch_row_count
+            )
 
-            # Calculate expected row count for this batch
-            # State data is immutable, so we can rely on state_row_count
-            batch_row_count = state_row_count - batch_offset
-            batch_row_count = min(batch_row_count, batch_limit)
-            logging.debug(f'batch {batch_num + 1} loaded {batch_row_count} rows')
+            # Build and publish the output batch
+            query_state_entries = self._build_query_state_entries(
+                batch_state,
+                output_batch_offset_start,
+                output_batch_offset_end
+            )
 
-            for row_index in range(batch_row_count):
-                query_state_entry = batch_state.build_query_state_from_row_data(index=row_index)
-                route_message = {
-                    **base_processor_message,
-                    "query_state": [query_state_entry]
-                }
-                await route.publish(msg=json.dumps(route_message))
+            rows_published = await self._publish_output_batch(
+                query_state_entries,
+                base_processor_message,
+                route
+            )
+            rows_processed += rows_published
 
-            logging.info(f'completed batch {batch_num + 1}/{total_batches}')
+        return rows_processed
+
+    async def _process_state_batch(
+        self,
+        processor_state_route,
+        batch_num: int,
+        batch_size: int,
+        total_batches: int,
+        state_row_count: int,
+        max_batch_limit: int,
+        base_processor_message: dict,
+        route,
+        route_id: str
+    ) -> int:
+        """
+        Loads and processes a single database batch.
+
+        This is the first level of batching - loading chunks from the database
+        to avoid OOM (controlled by maxBatchSize).
+
+        Args:
+            processor_state_route: The processor state route
+            batch_num: Current batch number (0-indexed)
+            batch_size: Size of each database load batch (processor's maxBatchSize)
+            total_batches: Total number of batches to process
+            state_row_count: Total number of rows in the entire state
+            max_batch_limit: Maximum rows per output batch (processor's maxBatchLimit)
+            base_processor_message: Base message structure
+            route: The route to publish to
+            route_id: Route identifier for logging
+
+        Returns:
+            int: Number of rows processed from this batch
+        """
+        batch_offset = batch_num * batch_size
+        logging.debug(
+            f'loading batch {batch_num + 1}/{total_batches}, '
+            f'offset={batch_offset}, limit={batch_size}'
+        )
+
+        # Load batch of state data from database
+        batch_state = storage.load_state(
+            state_id=processor_state_route.state_id,
+            load_data=True,
+            offset=batch_offset,
+            limit=batch_size
+        )
+
+        if not batch_state or not batch_state.data:
+            logging.warning(f'batch {batch_num + 1} returned no data, skipping')
+            return 0
+
+        # Calculate expected row count for this batch
+        # State data is immutable, so we can rely on state_row_count
+        batch_row_count = state_row_count - batch_offset
+        batch_row_count = min(batch_row_count, batch_size)
+        logging.debug(f'batch {batch_num + 1} loaded {batch_row_count} rows')
+
+        # Process and publish output batches
+        rows_processed = await self._process_and_publish_output_batches(
+            batch_state,
+            batch_row_count,
+            max_batch_limit,
+            base_processor_message,
+            route,
+            batch_num,
+            total_batches
+        )
+
+        logging.info(f'completed batch no: {batch_num + 1} / {total_batches} for route {route_id}, processed rows: {rows_processed}')
+        return rows_processed
+
 
 # =============================================================================
 # Main Execution

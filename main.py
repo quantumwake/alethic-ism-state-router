@@ -148,6 +148,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
                 - route_id: Route identifier for fetching processor assignment
                 - query_state: State entry or list of entries to process
                 - context: Optional context data
+                - input_route_id: Optional input route id for calibration/retry support
 
         Raises:
             ValueError: If route_id or query_state is missing, or if processor/route not found
@@ -160,6 +161,9 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
 
         # Get the route this message is ingress on
         route_id = message['route_id']
+
+        # Get input_route_id for calibration/retry support (pass-through)
+        input_route_id = message.get('input_route_id')
 
         # Normalize query_state to a list
         query_state = message['query_state']
@@ -180,7 +184,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         logging.debug(f'sending query state entry to route provider: {route.selector}, route: {route_id}')
         route_message = self._build_base_route_message(
             route_id=route_id,
-            context=message.get('context')
+            context=message.get('context'),
+            input_route_id=input_route_id
         )
         route_message['query_state'] = query_state
 
@@ -198,6 +203,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             message: Message containing:
                 - route_id: Route identifier for fetching processor state route
                 - context: Optional context data
+                - input_route_id: Optional input route id for calibration/retry support
 
         Raises:
             ValueError: If route_id is missing or invalid
@@ -206,13 +212,17 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         # Validate message and fetch route data
         route_id, processor_state_route, state_metadata = self._validate_and_fetch_route_data(message)
 
+        # Get input_route_id for calibration/retry support (pass-through)
+        input_route_id = message.get('input_route_id')
+
         total_count = state_metadata.count
         logging.info(f'execute route {route_id}, state has {total_count} rows, will process in batches')
 
         # Build base message structure common to all forwarded messages
         base_processor_message = self._build_base_route_message(
             route_id=route_id,
-            context=message.get('context')
+            context=message.get('context'),
+            input_route_id=input_route_id
         )
 
         # Fetch the target processor and its messaging route
@@ -279,20 +289,22 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
 
         return processor, route
 
-    def _build_base_route_message(self, route_id: str, context: dict = None) -> dict:
+    def _build_base_route_message(self, route_id: str, context: dict = None, input_route_id: str = None) -> dict:
         """
         Builds the base message structure for routing.
 
         Args:
             route_id: Route identifier
             context: Optional context data to include in message
+            input_route_id: The input route id where the input originally came from (for calibration/retry)
 
         Returns:
-            dict: Base message structure with type, route_id, and context
+            dict: Base message structure with type, route_id, input_route_id, and context
         """
         return {
             "type": "query_state",
             "route_id": route_id,
+            "input_route_id": input_route_id,
             "context": context if context else {}
         }
 

@@ -181,7 +181,10 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         processor, route = self._fetch_processor_and_route(forward_processor_state.processor_id)
 
         # Build and publish the route message
-        logging.debug(f'sending query state entry to route provider: {route.selector}, route: {route_id}')
+        priority = message.get('priority')
+        subject = route.get_publish_subject(priority=priority, partition_key=processor.project_id)
+        logging.debug(f'sending query state entry to route provider: {route.selector}, route: {route_id}, subject: {subject}')
+
         route_message = self._build_base_route_message(
             route_id=route_id,
             context=message.get('context'),
@@ -189,7 +192,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         )
         route_message['query_state'] = query_state
 
-        await route.publish(msg=json.dumps(route_message))
+        await route.publish(msg=json.dumps(route_message), subject=subject)
 
     async def execute_processor_state_route(self, message: dict):
         """
@@ -235,10 +238,14 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             )
             return
 
+        # Build priority subject if enabled
+        priority = message.get('priority')
+        subject = route.get_publish_subject(priority=priority, partition_key=processor.project_id)
+
         # Handle empty state sets
         state_row_count = state_metadata.count
         if state_row_count == 0:
-            await self._handle_empty_state(route, base_processor_message, route_id)
+            await self._handle_empty_state(route, base_processor_message, route_id, subject)
             return
 
         # Process state data in batches to avoid OOM
@@ -257,7 +264,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
                 max_batch_limit,
                 base_processor_message,
                 route,
-                route_id
+                route_id,
+                subject
             )
             state_row_count_processed += rows_processed
 
@@ -385,7 +393,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             for row_index in range(start_index, end_index)
         ]
 
-    async def _handle_empty_state(self, route, base_processor_message, route_id):
+    async def _handle_empty_state(self, route, base_processor_message, route_id, subject=None):
         """
         Handles empty state sets by sending an empty query to the processor.
 
@@ -393,14 +401,15 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             route: The route to publish to
             base_processor_message: Base message structure
             route_id: Route identifier for logging
+            subject: Optional priority subject override
         """
         logging.info(f'route {route_id} has empty state set, sending empty query')
         await route.publish(msg=json.dumps({
             **base_processor_message,
             "query_state": []
-        }))
+        }), subject=subject)
 
-    async def _publish_output_batch(self, query_state_entries: list, base_processor_message: dict, route):
+    async def _publish_output_batch(self, query_state_entries: list, base_processor_message: dict, route, subject=None):
         """
         Publishes a single output batch to the processor route.
 
@@ -408,6 +417,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             query_state_entries: List of query state entries to publish
             base_processor_message: Base message structure
             route: The route to publish to
+            subject: Optional priority subject override
 
         Returns:
             int: Number of entries published
@@ -416,7 +426,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             **base_processor_message,
             "query_state": query_state_entries
         }
-        await route.publish(msg=json.dumps(route_message))
+        await route.publish(msg=json.dumps(route_message), subject=subject)
         return len(query_state_entries)
 
     async def _process_and_publish_output_batches(
@@ -427,7 +437,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         base_processor_message: dict,
         route,
         batch_num: int,
-        total_batches: int
+        total_batches: int,
+        subject=None
     ) -> int:
         """
         Splits a loaded state batch into smaller output batches and publishes them.
@@ -443,6 +454,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             route: The route to publish to
             batch_num: Current batch number (for logging)
             total_batches: Total number of batches (for logging)
+            subject: Optional priority subject override
 
         Returns:
             int: Total number of rows processed from this batch
@@ -451,7 +463,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         rows_processed = 0
 
         for output_batch_num in range(total_output_batches):
-            logging.info(
+            logging.debug(
                 f'processing output batch {output_batch_num + 1}/{total_output_batches} '
                 f'for state batch {batch_num + 1}/{total_batches}'
             )
@@ -473,7 +485,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             rows_published = await self._publish_output_batch(
                 query_state_entries,
                 base_processor_message,
-                route
+                route,
+                subject
             )
             rows_processed += rows_published
 
@@ -489,7 +502,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         max_batch_limit: int,
         base_processor_message: dict,
         route,
-        route_id: str
+        route_id: str,
+        subject=None
     ) -> int:
         """
         Loads and processes a single database batch.
@@ -507,15 +521,13 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             base_processor_message: Base message structure
             route: The route to publish to
             route_id: Route identifier for logging
+            subject: Optional priority subject override
 
         Returns:
             int: Number of rows processed from this batch
         """
         batch_offset = batch_num * batch_size
-        logging.debug(
-            f'loading batch {batch_num + 1}/{total_batches}, '
-            f'offset={batch_offset}, limit={batch_size}'
-        )
+        logging.debug(f'loading batch {batch_num + 1}/{total_batches}, offset={batch_offset}, limit={batch_size}')
 
         # Load batch of state data from database
         batch_state = storage.load_state(
@@ -529,10 +541,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             logging.warning(f'batch {batch_num + 1} returned no data, skipping')
             return 0
 
-        # Calculate expected row count for this batch
-        # State data is immutable, so we can rely on state_row_count
-        batch_row_count = state_row_count - batch_offset
-        batch_row_count = min(batch_row_count, batch_size)
+        # Calculate expected row count for this batch (state data is immutable)
+        batch_row_count = min(state_row_count - batch_offset, batch_size)
         logging.debug(f'batch {batch_num + 1} loaded {batch_row_count} rows')
 
         # Process and publish output batches
@@ -543,10 +553,11 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             base_processor_message,
             route,
             batch_num,
-            total_batches
+            total_batches,
+            subject
         )
 
-        logging.info(f'completed batch no: {batch_num + 1} / {total_batches} for route {route_id}, processed rows: {rows_processed}')
+        logging.info(f'completed batch {batch_num + 1}/{total_batches} for route {route_id}, rows: {rows_processed}')
         return rows_processed
 
 

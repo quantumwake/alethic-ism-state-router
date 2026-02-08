@@ -2,7 +2,7 @@ import asyncio
 import json
 import math
 import os
-from typing import Tuple
+from typing import Tuple, Optional, Any
 
 import dotenv
 from ismcore.messaging.base_message_provider import BaseMessageConsumer
@@ -10,7 +10,8 @@ from ismcore.messaging.base_message_route_model import BaseRoute
 from ismcore.messaging.base_message_router import Router
 from ismcore.messaging.errors import RouteNotFoundError
 from ismcore.messaging.nats_message_provider import NATSMessageProvider
-from ismcore.model.base_model import ProcessorStatusCode, Processor, ProcessorPropertiesBase
+from ismcore.model.base_model import ProcessorStatusCode, Processor, ProcessorPropertiesBase, ProcessorState, ConcurrencyMode
+from ismcore.utils.evaluate import safer_evaluate
 from ismdb.postgres_storage_class import PostgresDatabaseStorage
 
 from logger import logging
@@ -179,11 +180,20 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         # TODO: Add caching layer on the storage engine to reduce database calls
         logging.debug(f'fetching processor {forward_processor_state.processor_id} and route details')
         processor, route = self._fetch_processor_and_route(forward_processor_state.processor_id)
+        processor_properties = ProcessorPropertiesBase(**(processor.properties or {}))
 
         # Build and publish the route message
         priority = message.get('priority')
-        subject = route.get_publish_subject(priority=priority, partition_key=processor.project_id)
-        logging.debug(f'sending query state entry to route provider: {route.selector}, route: {route_id}, subject: {subject}')
+        context = message.get('context')
+        partition_key = self._get_partition_key(
+            processor=processor,
+            processor_properties=processor_properties,
+            route_id=route_id,
+            query_state=query_state,
+            context=context
+        )
+        subject = route.get_publish_subject(priority=priority, partition_key=partition_key)
+        logging.debug(f'sending query state entry to route provider: {route.selector}, route: {route_id}, subject: {subject}, partition_key: {partition_key}')
 
         route_message = self._build_base_route_message(
             route_id=route_id,
@@ -238,17 +248,26 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             )
             return
 
-        # Build priority subject if enabled
+        # Get priority and context for partition key calculation
         priority = message.get('priority')
-        subject = route.get_publish_subject(priority=priority, partition_key=processor.project_id)
+        context = message.get('context')
 
-        # Handle empty state sets
+        # Handle empty state sets (partition key calculated without query_state)
         state_row_count = state_metadata.count
         if state_row_count == 0:
+            partition_key = self._get_partition_key(
+                processor=processor,
+                processor_properties=processor_properties,
+                route_id=route_id,
+                query_state=None,
+                context=context
+            )
+            subject = route.get_publish_subject(priority=priority, partition_key=partition_key)
             await self._handle_empty_state(route, base_processor_message, route_id, subject)
             return
 
         # Process state data in batches to avoid OOM
+        # Partition key is calculated per-batch after data is loaded (for EXPRESSION mode)
         batch_size = processor_properties.maxBatchSize
         max_batch_limit = processor_properties.maxBatchLimit
         total_batches = math.ceil(state_row_count / batch_size)
@@ -265,7 +284,10 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
                 base_processor_message,
                 route,
                 route_id,
-                subject
+                processor=processor,
+                processor_properties=processor_properties,
+                context=context,
+                priority=priority
             )
             state_row_count_processed += rows_processed
 
@@ -296,6 +318,43 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             raise ValueError(f'Route not found for provider: {processor.provider_id}')
 
         return processor, route
+
+    def _get_partition_key(
+        self,
+        processor: Processor,
+        processor_properties: ProcessorPropertiesBase,
+        route_id: str,
+        query_state: Optional[Any] = None,
+        context: Optional[dict] = None
+    ) -> str:
+        """
+        Derives the partition key based on the processor's concurrency mode.
+        """
+        mode = processor_properties.concurrencyMode or ConcurrencyMode.PROJECT_ID
+
+        if mode == ConcurrencyMode.PROJECT_ID:
+            return processor.project_id
+        elif mode == ConcurrencyMode.USER_ID:
+            return str(context.get('user_id', processor.project_id)) if context else processor.project_id
+        elif mode == ConcurrencyMode.ROUTE_ID:
+            return route_id
+        elif mode == ConcurrencyMode.EXPRESSION:
+            if not processor_properties.concurrencyExpression:
+                return processor.project_id
+            try:
+                qs = query_state[0] if isinstance(query_state, list) and query_state else query_state
+                result = safer_evaluate(processor_properties.concurrencyExpression, allowed_vars={
+                    'data': qs,
+                    'context': context or {},
+                    'route_id': route_id
+                })
+                # always include project_id as prefix to avoid cross-project concurrency issues, even if the expression result is empty
+                return f"{processor.project_id}.{result}" if result else processor.project_id
+            except Exception as e:
+                logging.error(f'concurrency expression error: {e}')
+                return processor.project_id
+        else:
+            return processor.project_id
 
     def _build_base_route_message(self, route_id: str, context: dict = None, input_route_id: str = None) -> dict:
         """
@@ -503,7 +562,10 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         base_processor_message: dict,
         route,
         route_id: str,
-        subject=None
+        processor: Processor = None,
+        processor_properties: ProcessorPropertiesBase = None,
+        context: dict = None,
+        priority: int = None
     ) -> int:
         """
         Loads and processes a single database batch.
@@ -521,7 +583,10 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             base_processor_message: Base message structure
             route: The route to publish to
             route_id: Route identifier for logging
-            subject: Optional priority subject override
+            processor: The processor object for partition key calculation
+            processor_properties: Processor properties for partition key calculation
+            context: Context data for partition key calculation
+            priority: Priority for subject calculation
 
         Returns:
             int: Number of rows processed from this batch
@@ -544,6 +609,17 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         # Calculate expected row count for this batch (state data is immutable)
         batch_row_count = min(state_row_count - batch_offset, batch_size)
         logging.debug(f'batch {batch_num + 1} loaded {batch_row_count} rows')
+
+        # Calculate partition key using the first row of the batch (now that data is available)
+        first_row_query_state = batch_state.build_query_state_from_row_data(index=0)
+        partition_key = self._get_partition_key(
+            processor=processor,
+            processor_properties=processor_properties,
+            route_id=route_id,
+            query_state=first_row_query_state,
+            context=context
+        )
+        subject = route.get_publish_subject(priority=priority, partition_key=partition_key)
 
         # Process and publish output batches
         rows_processed = await self._process_and_publish_output_batches(

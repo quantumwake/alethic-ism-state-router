@@ -233,9 +233,11 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         total_count = state_metadata.count
         logging.info(f'execute route {route_id}, state has {total_count} rows, will process in batches')
 
-        # Generate a unique run identifier and timestamp for this execution
-        run_id = uuid.uuid4().hex[:8]
-        run_created_at = datetime.now(timezone.utc).isoformat()
+        # Fields applied to every query state entry in this run
+        apply_to_all = {
+            'run_id': uuid.uuid4().hex[:8],
+            'run_created_at': datetime.now(timezone.utc).isoformat()
+        }
 
         # Build base message structure common to all forwarded messages
         base_processor_message = self._build_base_route_message(
@@ -243,8 +245,6 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             context=message.get('context'),
             input_route_id=input_route_id
         )
-        base_processor_message['run_id'] = run_id
-        base_processor_message['run_created_at'] = run_created_at
 
         # Fetch the target processor and its messaging route
         try:
@@ -295,7 +295,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
                 processor=processor,
                 processor_properties=processor_properties,
                 context=context,
-                priority=priority
+                priority=priority,
+                apply_to_all=apply_to_all
             )
             state_row_count_processed += rows_processed
 
@@ -443,7 +444,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
 
         return processor, route, processor_properties
 
-    def _build_query_state_entries(self, batch_state, start_index: int, end_index: int) -> list:
+    def _build_query_state_entries(self, batch_state, start_index: int, end_index: int, apply_to_all: dict = None) -> list:
         """
         Builds query state entries from a slice of batch data.
 
@@ -451,14 +452,19 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             batch_state: The loaded state batch
             start_index: Start index (inclusive) within the batch
             end_index: End index (exclusive) within the batch
+            apply_to_all: Optional dict of fields to inject into every entry
 
         Returns:
             list: Query state entries for the specified range
         """
-        return [
-            batch_state.build_query_state_from_row_data(index=row_index)
-            for row_index in range(start_index, end_index)
-        ]
+        count = end_index - start_index
+        entries = [None] * count
+        for i, row_index in enumerate(range(start_index, end_index)):
+            entry = batch_state.build_query_state_from_row_data(index=row_index)
+            if apply_to_all:
+                entry.update(apply_to_all)
+            entries[i] = entry
+        return entries
 
     async def _handle_empty_state(self, route, base_processor_message, route_id, subject=None):
         """
@@ -505,7 +511,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         route,
         batch_num: int,
         total_batches: int,
-        subject=None
+        subject=None,
+        apply_to_all: dict = None
     ) -> int:
         """
         Splits a loaded state batch into smaller output batches and publishes them.
@@ -542,11 +549,12 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
                 batch_row_count
             )
 
-            # Build and publish the output batch
+            # Build the output batch
             query_state_entries = self._build_query_state_entries(
                 batch_state,
                 output_batch_offset_start,
-                output_batch_offset_end
+                output_batch_offset_end,
+                apply_to_all=apply_to_all
             )
 
             rows_published = await self._publish_output_batch(
@@ -573,7 +581,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         processor: Processor = None,
         processor_properties: ProcessorPropertiesBase = None,
         context: dict = None,
-        priority: int = None
+        priority: int = None,
+        apply_to_all: dict = None
     ) -> int:
         """
         Loads and processes a single database batch.
@@ -638,7 +647,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             route,
             batch_num,
             total_batches,
-            subject
+            subject,
+            apply_to_all=apply_to_all
         )
 
         logging.info(f'completed batch {batch_num + 1}/{total_batches} for route {route_id}, rows: {rows_processed}')

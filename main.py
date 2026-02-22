@@ -2,6 +2,8 @@ import asyncio
 import json
 import math
 import os
+import uuid
+from datetime import datetime, timezone
 from typing import Tuple, Optional, Any
 
 import dotenv
@@ -231,12 +233,18 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         total_count = state_metadata.count
         logging.info(f'execute route {route_id}, state has {total_count} rows, will process in batches')
 
+        # Generate a unique run identifier and timestamp for this execution
+        run_id = uuid.uuid4().hex[:8]
+        run_created_at = datetime.now(timezone.utc).isoformat()
+
         # Build base message structure common to all forwarded messages
         base_processor_message = self._build_base_route_message(
             route_id=route_id,
             context=message.get('context'),
             input_route_id=input_route_id
         )
+        base_processor_message['run_id'] = run_id
+        base_processor_message['run_created_at'] = run_created_at
 
         # Fetch the target processor and its messaging route
         try:

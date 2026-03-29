@@ -134,6 +134,8 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
 
         if 'query_state_entry' == message_type:
             await self.execute_query_state_entry(message)
+        elif 'query_processor_entry' == message_type:
+            await self.execute_query_processor_entry(message)
         elif 'query_state_route' == message_type:
             await self.execute_processor_state_route(message)
         else:
@@ -200,7 +202,65 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         route_message = self._build_base_route_message(
             route_id=route_id,
             context=message.get('context'),
-            input_route_id=input_route_id
+            input_route_id=input_route_id,
+            processor_id=forward_processor_state.processor_id,
+        )
+        route_message['query_state'] = query_state
+
+        await route.publish(msg=json.dumps(route_message), subject=subject)
+
+    async def execute_query_processor_entry(self, message: dict):
+        """
+        Routes query state entries directly to a processor by processor_id.
+
+        Unlike execute_query_state_entry which resolves the processor via a
+        route_id lookup, this handler takes a processor_id directly — no
+        input route required.  Used for manual connector triggers and any
+        case where data is sent to a processor without an upstream state.
+
+        Args:
+            message: Message containing:
+                - processor_id: Target processor ID
+                - query_state: State entry or list of entries to process
+                - context: Optional context data
+
+        Raises:
+            ValueError: If processor_id or query_state is missing, or processor not found
+        """
+        if 'processor_id' not in message:
+            raise ValueError(f'processor_id does not exist in message envelope {message}')
+
+        if 'query_state' not in message:
+            raise ValueError(f'no query_state entries found in message envelope {message}')
+
+        processor_id = message['processor_id']
+
+        # Normalize query_state to a list
+        query_state = message['query_state']
+        if not isinstance(query_state, list):
+            query_state = [query_state]
+
+        # Fetch processor and route directly — no route_id lookup needed
+        logging.debug(f'direct processor entry: fetching processor {processor_id}')
+        processor, route = self._fetch_processor_and_route(processor_id)
+        processor_properties = ProcessorPropertiesBase(**(processor.properties or {}))
+
+        # Build and publish the route message
+        priority = message.get('priority')
+        context = message.get('context')
+        partition_key = self._get_partition_key(
+            processor=processor,
+            processor_properties=processor_properties,
+            route_id=processor_id,
+            query_state=query_state,
+            context=context
+        )
+        subject = route.get_publish_subject(priority=priority, partition_key=partition_key)
+        logging.debug(f'direct processor entry: sending to {route.selector}, processor: {processor_id}, subject: {subject}')
+
+        route_message = self._build_base_route_message(
+            context=context,
+            processor_id=processor_id,
         )
         route_message['query_state'] = query_state
 
@@ -365,7 +425,7 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         else:
             return processor.project_id
 
-    def _build_base_route_message(self, route_id: str, context: dict = None, input_route_id: str = None) -> dict:
+    def _build_base_route_message(self, route_id: str = None, context: dict = None, input_route_id: str = None, processor_id: str = None) -> dict:
         """
         Builds the base message structure for routing.
 
@@ -373,16 +433,21 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
             route_id: Route identifier
             context: Optional context data to include in message
             input_route_id: The input route id where the input originally came from (for calibration/retry)
+            processor_id: The processor that owns this route (carried through for downstream consumers)
 
         Returns:
-            dict: Base message structure with type, route_id, input_route_id, and context
+            dict: Base message structure with type, route_id, processor_id, input_route_id, and context
         """
-        return {
+        msg = {
             "type": "query_state",
-            "route_id": route_id,
             "input_route_id": input_route_id,
             "context": context if context else {}
         }
+        if route_id is not None:
+            msg["route_id"] = route_id
+        if processor_id is not None:
+            msg["processor_id"] = processor_id
+        return msg
 
     def _validate_and_fetch_route_data(self, message: dict):
         """

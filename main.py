@@ -175,6 +175,9 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         if not isinstance(query_state, list):
             query_state = [query_state]
 
+        # Inject run metadata, preserving any run_id carried forward from upstream
+        self._inject_run_metadata(query_state)
+
         # Fetch the processor state route association
         forward_processor_state = storage.fetch_processor_state_route_by_route_id(route_id=route_id)
         if not forward_processor_state:
@@ -240,6 +243,9 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         if not isinstance(query_state, list):
             query_state = [query_state]
 
+        # Inject run metadata, preserving any run_id carried forward from upstream
+        self._inject_run_metadata(query_state)
+
         # Fetch processor and route directly — no route_id lookup needed
         logging.debug(f'direct processor entry: fetching processor {processor_id}')
         processor, route = self._fetch_processor_and_route(processor_id)
@@ -293,11 +299,10 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         total_count = state_metadata.count
         logging.info(f'execute route {route_id}, state has {total_count} rows, will process in batches')
 
-        # Fields applied to every query state entry in this run
-        apply_to_all = {
-            'run_id': uuid.uuid4().hex[:8],
-            'run_created_at': datetime.now(timezone.utc).isoformat()
-        }
+        # One run_id shared across every entry/slice in this batch execution;
+        # generated up front (empty list = no entries to inject yet) so all
+        # lazily-built slices reuse the same metadata.
+        apply_to_all = self._inject_run_metadata([])
 
         # Build base message structure common to all forwarded messages
         base_processor_message = self._build_base_route_message(
@@ -509,6 +514,29 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
 
         return processor, route, processor_properties
 
+    @staticmethod
+    def _inject_run_metadata(query_state: list, run_metadata: dict = None) -> dict:
+        """
+        Injects run_id/run_created_at into each entry in place, WITHOUT
+        overwriting a run_id already carried forward from upstream — entries
+        that already have a run_id are left untouched so the originating run
+        propagates intact through the pipeline.
+
+        Generates shared run metadata when none is supplied (so all new
+        entries in a single publish share one run_id); callers that build
+        entries lazily across slices pass a pre-generated dict to keep the
+        run_id consistent. Returns the run metadata used.
+        """
+        if run_metadata is None:
+            run_metadata = {
+                'run_id': uuid.uuid4().hex[:8],
+                'run_created_at': datetime.now(timezone.utc).isoformat()
+            }
+        for entry in query_state:
+            if isinstance(entry, dict) and not entry.get('run_id'):
+                entry.update(run_metadata)
+        return run_metadata
+
     def _build_query_state_entries(self, batch_state, start_index: int, end_index: int, apply_to_all: dict = None) -> list:
         """
         Builds query state entries from a slice of batch data.
@@ -525,10 +553,9 @@ class MessagingStateRouterConsumer(BaseMessageConsumer):
         count = end_index - start_index
         entries = [None] * count
         for i, row_index in enumerate(range(start_index, end_index)):
-            entry = batch_state.build_query_state_from_row_data(index=row_index)
-            if apply_to_all:
-                entry.update(apply_to_all)
-            entries[i] = entry
+            entries[i] = batch_state.build_query_state_from_row_data(index=row_index)
+        if apply_to_all:
+            self._inject_run_metadata(entries, apply_to_all)
         return entries
 
     async def _handle_empty_state(self, route, base_processor_message, route_id, subject=None):
